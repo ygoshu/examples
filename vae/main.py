@@ -26,15 +26,41 @@ torch.manual_seed(args.seed)
 
 device = torch.device("cuda" if args.cuda else "cpu")
 
+print('TRAINING DATA')
+train_data  = datasets.MNIST('../data', train=True, download=True,
+                  transform=transforms.ToTensor())
+few_shot_class = 5 
+print('train len before removal')
+print(len(train_data.train_data))
+non_few_shot_ids = train_data.train_labels!=few_shot_class
+train_data.train_labels = train_data.train_labels[non_few_shot_ids]
+train_data.train_data = train_data.train_data[non_few_shot_ids]
+print('train post removal')
+print(len(train_data.train_data))
+
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 train_loader = torch.utils.data.DataLoader(
-    datasets.MNIST('../data', train=True, download=True,
-                   transform=transforms.ToTensor()),
-    batch_size=args.batch_size, shuffle=True, **kwargs)
-test_loader = torch.utils.data.DataLoader(
-    datasets.MNIST('../data', train=False, transform=transforms.ToTensor()),
+    train_data,
     batch_size=args.batch_size, shuffle=True, **kwargs)
 
+print('TESTING DATA')
+use_emnist=True
+if (use_emnist):
+    print('using letters')
+    test_data  = datasets.EMNIST('~/data/emnist/', split='letters', download=True, train=False,  transform=transforms.ToTensor())
+else:
+    print('using mnist')
+    test_data  = datasets.MNIST('~/data/mnist/', train=False, download=True, transform=transforms.ToTensor())
+few_shot_ids = test_data.test_labels==few_shot_class
+if not use_emnist and few_shot_class >9:
+    print('mixing emnist and mnist label for few shot class')
+    exit(1)
+print(len(test_data.test_data))
+test_data.test_labels = test_data.test_labels[few_shot_ids]
+test_data.test_data =  test_data.test_data[few_shot_ids]
+test_loader = torch.utils.data.DataLoader(
+   test_data, batch_size=args.batch_size, shuffle=True, **kwargs)
+print(len(test_data.test_data))
 
 class VAE(nn.Module):
     def __init__(self):
@@ -98,7 +124,7 @@ def train(epoch):
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader),
                 loss.item() / len(data)))
-
+        torch.save(model.state_dict(), './vae.pkl')
     print('====> Epoch: {} Average loss: {:.4f}'.format(
           epoch, train_loss / len(train_loader.dataset)))
 
