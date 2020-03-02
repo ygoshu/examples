@@ -9,7 +9,7 @@ from torchvision.utils import save_image
 
 
 parser = argparse.ArgumentParser(description='VAE MNIST Example')
-parser.add_argument('--batch-size', type=int, default=128, metavar='N',
+parser.add_argument('--batch-size', type=int, default=8, metavar='N',
                     help='input batch size for training (default: 128)')
 parser.add_argument('--epochs', type=int, default=10, metavar='N',
                     help='number of epochs to train (default: 10)')
@@ -26,10 +26,11 @@ torch.manual_seed(args.seed)
 
 device = torch.device("cuda" if args.cuda else "cpu")
 
+transformith = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
 print('TRAINING DATA')
-train_data  = datasets.MNIST('../data', train=True, download=True,
-                  transform=transforms.ToTensor())
-few_shot_class = 5 
+train_data  = datasets.MNIST('data/mnist_train', train=True, download=True,
+                  transform=transformith )
+few_shot_class = 5
 print('train len before removal')
 print(len(train_data.train_data))
 non_few_shot_ids = train_data.train_labels!=few_shot_class
@@ -37,24 +38,17 @@ train_data.train_labels = train_data.train_labels[non_few_shot_ids]
 train_data.train_data = train_data.train_data[non_few_shot_ids]
 print('train post removal')
 print(len(train_data.train_data))
-
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 train_loader = torch.utils.data.DataLoader(
     train_data,
     batch_size=args.batch_size, shuffle=True, **kwargs)
 
+
+
 print('TESTING DATA')
-use_emnist=True
-if (use_emnist):
-    print('using letters')
-    test_data  = datasets.EMNIST('~/data/emnist/', split='letters', download=True, train=False,  transform=transforms.ToTensor())
-else:
-    print('using mnist')
-    test_data  = datasets.MNIST('~/data/mnist/', train=False, download=True, transform=transforms.ToTensor())
+print('using mnist')
+test_data  = datasets.MNIST('data/mnist_test/', train=False, download=True, transform=transformith )
 few_shot_ids = test_data.test_labels==few_shot_class
-if not use_emnist and few_shot_class >9:
-    print('mixing emnist and mnist label for few shot class')
-    exit(1)
 print(len(test_data.test_data))
 test_data.test_labels = test_data.test_labels[few_shot_ids]
 test_data.test_data =  test_data.test_data[few_shot_ids]
@@ -129,11 +123,17 @@ def train(epoch):
           epoch, train_loss / len(train_loader.dataset)))
 
 
-def test(epoch):
+def test(epoch,use_emnist=False ):
+    model.load_state_dict(torch.load('vae.pkl'))
     model.eval()
     test_loss = 0
+
     with torch.no_grad():
-        for i, (data, _) in enumerate(test_loader):
+      if not use_emnist:
+        #switching loader between train and test to make sure recon works 
+        for i, (data, _) in enumerate(train_loader):
+            if (i == 2):
+                break
             data = data.to(device)
             recon_batch, mu, logvar = model(data)
             test_loss += loss_function(recon_batch, data, mu, logvar).item()
@@ -143,14 +143,32 @@ def test(epoch):
                                       recon_batch.view(args.batch_size, 1, 28, 28)[:n]])
                 save_image(comparison.cpu(),
                          'results/reconstruction_' + str(epoch) + '.png', nrow=n)
-
-    test_loss /= len(test_loader.dataset)
-    print('====> Test set loss: {:.4f}'.format(test_loss))
+        test_loss /= len(test_loader.dataset)
+        print('====> Test set loss: {:.4f}'.format(test_loss))
+      else:
+        from emnist import extract_training_samples
+        images, labels = extract_training_samples('letters')
+        
+        data = torch.from_numpy(images[16:24]).float().to(device)
+#        data = data.mul(0.5).add(0.5) 
+        recon_batch, mu, logvar = model(data)
+        test_loss += loss_function(recon_batch, data, mu, logvar).item()
+        recon_batch = recon_batch.unsqueeze(1)
+        n = min(data.size(0), 8)
+        data = data.unsqueeze(1)
+        print(data.size())
+        comparison = torch.cat([data[:n],
+                              recon_batch.view(args.batch_size, 1, 28, 28)[:n]])
+        save_image(comparison.cpu(),
+                 'results/emnist_reconstruction_' + str(epoch) + '.png', nrow=n)
+        test_loss /= args.batch_size
+        print('====> Test set loss: {:.4f}'.format(test_loss))
+  
 
 if __name__ == "__main__":
     for epoch in range(1, args.epochs + 1):
         train(epoch)
-        test(epoch)
+        test(epoch, use_emnist=False)
         with torch.no_grad():
             sample = torch.randn(64, 20).to(device)
             sample = model.decode(sample).cpu()
