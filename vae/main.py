@@ -1,17 +1,25 @@
 from __future__ import print_function
 import argparse
+import os
 import torch
 import torch.utils.data
 from torch import nn, optim
+from torch.autograd import Variable
 from torch.nn import functional as F
-from torchvision import datasets, transforms
+from torchvision import utils, datasets, transforms
 from torchvision.utils import save_image
-
+import sys
+sys.path.insert(1, '/home/yag3/WGAN/pytorch-wgan')
+from utils.fashion_mnist import MNIST
 
 parser = argparse.ArgumentParser(description='VAE MNIST Example')
-parser.add_argument('--batch-size', type=int, default=8, metavar='N',
+parser.add_argument('--batch-size', type=int, default=64, metavar='N',
                     help='input batch size for training (default: 128)')
-parser.add_argument('--epochs', type=int, default=10, metavar='N',
+parser.add_argument('--latent-dim', type=int, default=20, metavar='N',
+                    help='latent dim (default: 20)')
+parser.add_argument('--test-batch-size', type=int, default=8, metavar='N',
+                    help='input batch size for training (default: 8)')
+parser.add_argument('--epochs', type=int, default=1, metavar='N',
                     help='number of epochs to train (default: 10)')
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='enables CUDA training')
@@ -26,35 +34,26 @@ torch.manual_seed(args.seed)
 
 device = torch.device("cuda" if args.cuda else "cpu")
 
-transformith = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-print('TRAINING DATA')
-train_data  = datasets.MNIST('data/mnist_train', train=True, download=True,
-                  transform=transformith )
-few_shot_class = 5
-print('train len before removal')
-print(len(train_data.train_data))
-non_few_shot_ids = train_data.train_labels!=few_shot_class
-train_data.train_labels = train_data.train_labels[non_few_shot_ids]
-train_data.train_data = train_data.train_data[non_few_shot_ids]
-print('train post removal')
-print(len(train_data.train_data))
+trans = transforms.Compose([
+    transforms.Scale(28),
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,))
+])
+
+Tensor = torch.cuda.FloatTensor if args.cuda else torch.FloatTensor
+
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 train_loader = torch.utils.data.DataLoader(
-    train_data,
+    datasets.MNIST('./data/train_mnist', train=True, download=True,
+                   transform=trans),
     batch_size=args.batch_size, shuffle=True, **kwargs)
 
+test_emnist_dataset = MNIST(root='./data/test_emnist', train=False, download=True, transform=trans, few_shot_class=5, test_emnist=True) 
+test_emnist_loader  = torch.utils.data.DataLoader(test_emnist_dataset ,  batch_size=args.test_batch_size, shuffle=True)
 
-
-print('TESTING DATA')
-print('using mnist')
-test_data  = datasets.MNIST('data/mnist_test/', train=False, download=True, transform=transformith )
-few_shot_ids = test_data.test_labels==few_shot_class
-print(len(test_data.test_data))
-test_data.test_labels = test_data.test_labels[few_shot_ids]
-test_data.test_data =  test_data.test_data[few_shot_ids]
-test_loader = torch.utils.data.DataLoader(
-   test_data, batch_size=args.batch_size, shuffle=True, **kwargs)
-print(len(test_data.test_data))
+test_mnist_loader = torch.utils.data.DataLoader(
+    datasets.MNIST('./data/test_mnist', train=False, download=True, transform=trans),
+    batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
 class VAE(nn.Module):
     def __init__(self):
@@ -62,8 +61,8 @@ class VAE(nn.Module):
 
         self.fc1 = nn.Linear(784, 400)
         self.fc21 = nn.Linear(400, 20)
-        self.fc22 = nn.Linear(400, 20)
-        self.fc3 = nn.Linear(20, 400)
+        self.fc22 = nn.Linear(400, args.latent_dim)
+        self.fc3 = nn.Linear(args.latent_dim, 400)
         self.fc4 = nn.Linear(400, 784)
 
     def encode(self, x):
@@ -86,7 +85,7 @@ class VAE(nn.Module):
 
 
 model = VAE().to(device)
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+optimizer = optim.Adam(model.parameters(), lr=2e-4)
 
 
 # Reconstruction + KL divergence losses summed over all elements and batch
@@ -123,54 +122,96 @@ def train(epoch):
           epoch, train_loss / len(train_loader.dataset)))
 
 
-def test(epoch,use_emnist=False ):
-    model.load_state_dict(torch.load('vae.pkl'))
+def test(epoch, test_loader):
     model.eval()
+    model.load_state_dict(torch.load('vae.pkl'))
     test_loss = 0
-
     with torch.no_grad():
-      if not use_emnist:
-        #switching loader between train and test to make sure recon works 
-        for i, (data, _) in enumerate(train_loader):
-            if (i == 2):
-                break
+        for i, (data, _) in enumerate(test_loader):
             data = data.to(device)
             recon_batch, mu, logvar = model(data)
             test_loss += loss_function(recon_batch, data, mu, logvar).item()
             if i == 0:
                 n = min(data.size(0), 8)
                 comparison = torch.cat([data[:n],
-                                      recon_batch.view(args.batch_size, 1, 28, 28)[:n]])
+                                      recon_batch.view(args.test_batch_size, 1, 28, 28)[:n]])
                 save_image(comparison.cpu(),
-                         'results/reconstruction_' + str(epoch) + '.png', nrow=n)
-        test_loss /= len(test_loader.dataset)
-        print('====> Test set loss: {:.4f}'.format(test_loss))
-      else:
-        from emnist import extract_training_samples
-        images, labels = extract_training_samples('letters')
-        
-        data = torch.from_numpy(images[16:24]).float().to(device)
-#        data = data.mul(0.5).add(0.5) 
-        recon_batch, mu, logvar = model(data)
-        test_loss += loss_function(recon_batch, data, mu, logvar).item()
-        recon_batch = recon_batch.unsqueeze(1)
-        n = min(data.size(0), 8)
-        data = data.unsqueeze(1)
-        print(data.size())
-        comparison = torch.cat([data[:n],
-                              recon_batch.view(args.batch_size, 1, 28, 28)[:n]])
-        save_image(comparison.cpu(),
-                 'results/emnist_reconstruction_' + str(epoch) + '.png', nrow=n)
-        test_loss /= args.batch_size
-        print('====> Test set loss: {:.4f}'.format(test_loss))
-  
+                         'vae_results/reconstruction_' + str(epoch) + '_'+ str(is_emnist) + '.png', nrow=n)
+                break
+            
+    test_loss /= len(test_loader.dataset)
+    print('====> Test set loss: {:.4f}'.format(test_loss))
+
+def optimizeZ(test_loader):
+       if not os.path.exists('gen_vae_res/'):
+           os.makedirs('gen_vae_res/')
+       model.load_state_dict(torch.load('vae.pkl'))
+       z = torch.randn(args.test_batch_size, args.latent_dim).to(device)
+       #z = Variable(Tensor(np.random.normal(0, 1, (args.test_batch_size, args.latent_dim))))
+       z.requires_grad = True
+       print("Checking if z requires Gradient")
+       print(z.requires_grad)
+       learning_rate = 0.002
+       opt_iter = 0
+
+       loss_fn = torch.nn.MSELoss(reduction='elementwise_mean')
+       print("self.epochs")
+       epochs = 12000
+       images = None
+       for i, (image, _) in enumerate(test_loader):
+           if i != 4733:
+               continue
+           images = Variable(image.to(device).type(Tensor))
+           grid_org = utils.make_grid(images)
+           utils.save_image(grid_org, 'gen_vae_res/orig_ae_res_{}_{}.png'.format( str(opt_iter).zfill(3), str(is_emnist)))
+           break
+       optimizer = torch.optim.Adam([z], lr=learning_rate)
+       grid = None
+       og = None
+       for epoch in range(epochs):
+             #generate image
+             x_recon = model.decode(z)
+
+             if opt_iter == 0:
+                 og_recon = x_recon.to(device)
+             #calculate reconstruction loss 
+             loss = loss_fn(x_recon, images.view(args.test_batch_size,-1))  #test_loader andk get first img)
+
+             #zero out gradient so that the previous calculated gradient doesn't add on to the current calculated grad
+             optimizer.zero_grad()
+
+             #calculate gradient
+             loss.backward()
+
+             #update scale 
+             optimizer.step()
+             
+             if opt_iter % 1000 == 0:
+                 print("Iter {}, loss {}".format(str(opt_iter), str(loss.item())))
+                 x_recon = x_recon.view(args.test_batch_size, 1, 28, 28)
+                 utils.save_image(x_recon, 'gen_vae_res/gen_ae_res_{}_{}.png'.format(str(is_emnist), str(opt_iter).zfill(3)), nrow=x_recon.size(0))
+
+             opt_iter += 1
+
+       comparison = torch.cat([og_recon.view(args.test_batch_size, 1, 28, 28), 
+                                     images, 
+                                     x_recon.view(args.test_batch_size, 1, 28, 28)])
+       utils.save_image(comparison.cpu() ,
+                        'gen_vae_res/comparison_{}.png'.format(is_emnist),
+                          nrow=args.test_batch_size )
+
 
 if __name__ == "__main__":
     for epoch in range(1, args.epochs + 1):
-        train(epoch)
-        test(epoch, use_emnist=False)
+#        train(epoch)
+        is_emnist = 1
+#        test(epoch, test_emnist_loader)
+        optimizeZ(test_emnist_loader)
+        is_emnist = 0
+#        test(epoch, test_mnist_loader)
+        optimizeZ(test_mnist_loader)
         with torch.no_grad():
             sample = torch.randn(64, 20).to(device)
             sample = model.decode(sample).cpu()
             save_image(sample.view(64, 1, 28, 28),
-                       'results/sample_' + str(epoch) + '.png')
+                       'vae_results/sample_' + str(epoch) + '.png')
